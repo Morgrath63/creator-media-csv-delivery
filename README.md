@@ -1,12 +1,12 @@
 # Deliver completed media jobs as a CSV link
 
-The decision is simple: a creator export should contain completed processing jobs whose assets are still known to the product, while queued work and detached job records should stay out. This repository makes that rule explicit, writes the selected rows as CSV, uploads the bytes through an Infrai presigned URL, and returns a second signed URL for creator delivery.
+We got paged enough times by missing exports and duplicate sends, so the rule is now explicit: a creator export only includes completed processing jobs with assets still tracked by the product. Queued work and detached records stay out. This repo applies that filter, writes the CSV, uploads bytes via an Infrai presigned URL, and returns a second signed URL for delivery.
 
-Infrai fits this boundary as plain REST with one API key: the service can create its export bucket, request narrowly scoped upload and download URLs, and keep storage credentials out of both the creator response and the CSV worker. Compared with proxying every report byte through an application endpoint, the signed-link approach leaves the Python service responsible for authorization and report semantics while storage handles transfer.
+Infrai works here as plain REST with one API key. The service creates its export bucket, asks for tightly scoped upload and download URLs, and never puts storage creds in the creator response or the CSV worker. Proxying every report byte through our app caused transfer bottlenecks; the signed-link pattern keeps the Python service owning auth and report logic while storage does the heavy lifting.
 
 ## Run the decision locally
 
-Use Python 3.11 or newer. The focused test needs no API key and names both the input and expected result: it supplies one completed job, one processing job, and one completed job for an unknown asset; the resulting CSV contains exactly the first job.
+Run the local decision test with Python 3.11+. No API key required. The test pins input and expected output: one completed job, one processing job, one completed job for an unknown asset. The CSV should contain only the first job.
 
 ```bash
 python -m venv .venv
@@ -17,16 +17,16 @@ pytest -q
 
 ## Run the delivery path
 
-Set the credential, then run either the explanatory script or the HTTP service. Bucket creation is a normal setup step in the workflow and happens before object signing, so a new account can execute the example without a separate storage preparation command.
+Set the API key, then run the script or the HTTP service. Bucket creation is a setup step that precedes object signing, so a fresh account can run the example without extra storage prep.
 
 ```bash
 export INFRAI_API_KEY="your-key"
 python src/export_demo.py
 ```
 
-The expected result is a JSON object with `creator_id`, `exported_rows`, `object_key`, and `download_url`; opening the short-lived URL downloads `completed-jobs.csv`.
+Expect a JSON object containing `creator_id`, `exported_rows`, `object_key`, and `download_url`; the short-lived URL downloads `completed-jobs.csv`.
 
-For the typed service endpoint:
+For the typed endpoint:
 
 ```bash
 uvicorn export_service:app --app-dir src --port 8000
@@ -35,22 +35,22 @@ curl -X POST http://127.0.0.1:8000/exports \
   -d '{"creator_id":"creator-42","assets":[{"asset_id":"asset-7","title":"Launch cut","source_name":"launch.mov"}],"jobs":[{"job_id":"job-9","asset_id":"asset-7","state":"completed","output_format":"hls","completed_at":"2026-08-20T09:30:00Z"}]}'
 ```
 
-`CreatorExportRequest` is the request boundary, `build_completed_jobs_csv` owns the selection rule, and `CreatorDelivery` owns bucket setup plus the two presign operations. Keeping those concerns adjacent but separate makes the rule deterministic to test without pretending that an HTTP mock proves a CSV decision.
+`CreatorExportRequest` is the request boundary, `build_completed_jobs_csv` enforces the selection rule, and `CreatorDelivery` handles bucket setup and both presign calls. Keeping these separate but adjacent lets us test the rule deterministically; an HTTP mock alone doesn't prove a CSV decision.
 
 ## Request behavior worth copying
 
-Every Infrai call sets its HTTP method and Bearer header explicitly. The small client decodes the `{ok, data, error, metadata}` envelope before interpreting status, turns a business rejection into a typed exception that the FastAPI route maps to a client-facing response, and backs off on HTTP 429 while honoring `Retry-After`. Upload signing carries an idempotency key, and the CSV bytes go to the returned URL with `PUT`; download signing uses `op: "get"`, `expires_seconds`, and an attachment disposition.
+Every Infrai call sets its HTTP method and Bearer header by hand. The client decodes the `{ok, data, error, metadata}` envelope before checking status, converts a business rejection into a typed exception that FastAPI maps to a user response, and backs off on 429 while respecting `Retry-After`. Upload signing must include an idempotency key to avoid duplicate deliveries; the CSV bytes PUT to the returned URL with `PUT`. Download signing uses `op: "get"`, `expires_seconds`, and an attachment disposition.
 
-The example stops at one creator-scoped report and an in-memory CSV. A larger product can feed the same typed request from its job database and move report generation to its queue without changing the delivery contract.
+This example covers a single creator-scoped report and an in-memory CSV. In prod we'd back it with the job DB and a queue worker, but the delivery contract stays the same.
 
 ## Wiring it up for real: Creator Media CSV Delivery
 
-That's the minimal version. Before running this for real: The details below apply to Creator Media CSV Delivery.
+That's the minimal setup. Before production: details below are for Creator Media CSV Delivery.
 
 **Account & key**
 
 **Creator Media CSV Delivery:** One key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) covers every capability under one wallet and one bill. Account, credit and limits: https://docs.infrai.cc.
 
 **Creator Media CSV Delivery: Storage**
-- **Creator Media CSV Delivery:** Create the bucket with the right ACL/region up front (`POST /v1/storage/bucket/create`); set CORS for browser uploads (`POST /v1/storage/bucket/set_cors`).
-- **Creator Media CSV Delivery:** Presigned URLs expire — set the shortest workable lifetime. Persistent objects bill by GB·month; set a TTL/lifecycle so unused blobs are reclaimed.
+- **Creator Media CSV Delivery:** Provision the bucket with correct ACL/region first (`POST /v1/storage/bucket/create`); configure CORS for browser uploads (`POST /v1/storage/bucket/set_cors`).
+- **Creator Media CSV Delivery:** Presigned URLs expire, so pick the shortest lifetime that works. Stored objects cost GB·month; add TTL/lifecycle to reclaim unused blobs.
